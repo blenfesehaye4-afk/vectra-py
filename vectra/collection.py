@@ -1,4 +1,4 @@
-"""Vector collection managing documents, indexing, and similarity searches."""
+"""Vector collection managing documents, HNSW indexing, BM25 lexical search, and hybrid retrieval."""
 
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -6,9 +6,12 @@ import sys
 from typing import Any, Mapping, Sequence
 import uuid
 
-from .metrics import compute_distance_and_score, normalize
-from .filter import matches_filter
+from .bm25 import BM25Index
 from .embedding import BaseEmbedder, TfIdfEmbedder
+from .filter import matches_filter
+from .hnsw import HNSWIndex
+from .hybrid import reciprocal_rank_fusion
+from .metrics import compute_distance_and_score, normalize
 
 
 @dataclass
@@ -62,8 +65,8 @@ class SearchResult:
 
 class Collection:
     """
-    Manages vector embeddings and provides fast exact nearest neighbor
-    search with rich metadata filtering.
+    Manages vector embeddings with exact or HNSW indexing,
+    BM25 lexical retrieval, and Reciprocal Rank Fusion (RRF) hybrid search.
     """
 
     def __init__(
@@ -72,12 +75,22 @@ class Collection:
         dimension: int | None = None,
         metric: str = "cosine",
         embedder: BaseEmbedder | None = None,
+        index_type: str = "flat",
     ):
         self.name = name
         self.metric = metric.lower()
+        self.index_type = index_type.lower()
         self._embedder = embedder or TfIdfEmbedder(dim=dimension or 128)
         self.dimension = dimension or self._embedder.dimension
         self._documents: dict[str, Document] = {}
+
+        # BM25 Lexical Inverted Index
+        self.bm25 = BM25Index()
+
+        # HNSW Approximate Nearest Neighbor Graph Index
+        self.hnsw: HNSWIndex | None = None
+        if self.index_type == "hnsw":
+            self.hnsw = HNSWIndex(dimension=self.dimension, metric=self.metric)
 
     @property
     def embedder(self) -> BaseEmbedder:
@@ -94,6 +107,18 @@ class Collection:
 
     def __contains__(self, doc_id: str) -> bool:
         return doc_id in self._documents
+
+    def build_hnsw_index(self, m: int = 16, ef_construction: int = 64) -> None:
+        """Construct an HNSW index over all current vectors in the collection."""
+        self.hnsw = HNSWIndex(
+            dimension=self.dimension,
+            metric=self.metric,
+            m=m,
+            ef_construction=ef_construction,
+        )
+        self.index_type = "hnsw"
+        for doc in self._documents.values():
+            self.hnsw.insert(doc.id, doc.vector)
 
     def add(
         self,
@@ -120,6 +145,15 @@ class Collection:
 
         doc = Document(id=doc_id, vector=vec, text=text, metadata=meta)
         self._documents[doc_id] = doc
+
+        # Synchronize BM25 lexical index
+        if text:
+            self.bm25.index_document(doc_id, text)
+
+        # Synchronize HNSW graph index
+        if self.hnsw is not None:
+            self.hnsw.insert(doc_id, vec)
+
         return doc
 
     def add_batch(self, docs: Sequence[Document | dict[str, Any]]) -> int:
@@ -132,6 +166,10 @@ class Collection:
                         f"Vector dimension {len(item.vector)} does not match collection dimension {self.dimension}"
                     )
                 self._documents[item.id] = item
+                if item.text:
+                    self.bm25.index_document(item.id, item.text)
+                if self.hnsw is not None:
+                    self.hnsw.insert(item.id, item.vector)
                 count += 1
             elif isinstance(item, dict):
                 self.add(
@@ -148,8 +186,14 @@ class Collection:
         return self._documents.get(doc_id)
 
     def delete(self, doc_id: str) -> bool:
-        """Delete a document by ID. Returns True if found and deleted."""
-        return self._documents.pop(doc_id, None) is not None
+        """Delete a document by ID."""
+        doc = self._documents.pop(doc_id, None)
+        if doc is not None:
+            self.bm25.remove_document(doc_id)
+            if self.hnsw is not None:
+                self.hnsw.delete(doc_id)
+            return True
+        return False
 
     def delete_where(self, filter_dict: Mapping[str, Any]) -> int:
         """Delete all documents matching a metadata filter query."""
@@ -159,7 +203,7 @@ class Collection:
             if matches_filter(doc.metadata, filter_dict)
         ]
         for doc_id in to_delete:
-            del self._documents[doc_id]
+            self.delete(doc_id)
         return len(to_delete)
 
     def query(
@@ -172,15 +216,7 @@ class Collection:
         include_vectors: bool = False,
     ) -> list[SearchResult]:
         """
-        Query the collection for the nearest neighbors.
-
-        Args:
-            vector: Query dense vector.
-            text: Query text to embed with the collection embedder.
-            top_k: Maximum number of search results to return.
-            filter: Metadata filter dictionary.
-            score_threshold: Minimum similarity score threshold (0.0 to 1.0).
-            include_vectors: Whether to include vectors in search results.
+        Query the collection for the nearest neighbors using exact scan or HNSW graph.
         """
         if vector is None:
             if text is None:
@@ -194,6 +230,28 @@ class Collection:
                 f"Query vector dimension {len(query_vec)} != collection dimension {self.dimension}"
             )
 
+        # Fast HNSW graph traversal when no metadata filtering is requested
+        if self.hnsw is not None and not filter and len(self.hnsw) > 0:
+            knn_res = self.hnsw.search_knn(query_vec, k=top_k)
+            candidates = []
+            for nid, score, dist in knn_res:
+                if score_threshold is not None and score < score_threshold:
+                    continue
+                doc = self._documents.get(nid)
+                if doc:
+                    candidates.append(
+                        SearchResult(
+                            id=doc.id,
+                            score=score,
+                            distance=dist,
+                            text=doc.text,
+                            metadata=doc.metadata,
+                            vector=doc.vector if include_vectors else None,
+                        )
+                    )
+            return candidates
+
+        # Exact scan with metadata filtering
         candidates: list[SearchResult] = []
         for doc in self._documents.values():
             if filter and not matches_filter(doc.metadata, filter):
@@ -214,17 +272,49 @@ class Collection:
                 )
             )
 
-        # Sort results: descending by score (higher is better)
         candidates.sort(key=lambda r: r.score, reverse=True)
         return candidates[:top_k]
+
+    def hybrid_query(
+        self,
+        text: str,
+        top_k: int = 5,
+        filter: Mapping[str, Any] | None = None,
+        dense_weight: float = 0.5,
+        sparse_weight: float = 0.5,
+    ) -> list[dict[str, Any]]:
+        """
+        Perform hybrid search combining dense semantic similarity with sparse BM25 keyword matching via RRF.
+        """
+        # 1. Dense search
+        dense_matches = self.query(text=text, top_k=top_k * 2, filter=filter)
+        dense_ranked = [(m.id, m.score) for m in dense_matches]
+
+        # 2. Sparse BM25 search
+        bm25_matches = self.bm25.search(text, top_k=top_k * 2)
+
+        # 3. Fuse via Reciprocal Rank Fusion
+        fused = reciprocal_rank_fusion(
+            dense_results=dense_ranked,
+            sparse_results=bm25_matches,
+            dense_weight=dense_weight,
+            sparse_weight=sparse_weight,
+            top_k=top_k,
+        )
+
+        # Attach document text & metadata to fused results
+        for item in fused:
+            doc = self._documents.get(item["id"])
+            if doc:
+                item["text"] = doc.text
+                item["metadata"] = doc.metadata
+
+        return fused
 
     def deduplicate(
         self, threshold: float = 0.95
     ) -> list[tuple[str, str, float]]:
-        """
-        Find pairs of documents whose similarity score exceeds the threshold.
-        Returns list of (id_a, id_b, similarity_score).
-        """
+        """Find pairs of documents whose similarity score exceeds the threshold."""
         items = list(self._documents.values())
         n = len(items)
         duplicates: list[tuple[str, str, float]] = []
@@ -255,6 +345,8 @@ class Collection:
             "count": doc_count,
             "dimension": self.dimension,
             "metric": self.metric,
+            "index_type": self.index_type,
+            "hnsw_nodes": len(self.hnsw) if self.hnsw is not None else 0,
             "approx_memory_bytes": approx_bytes,
             "metadata_fields": sorted(list(sample_meta_keys)),
         }
@@ -265,6 +357,7 @@ class Collection:
             "name": self.name,
             "dimension": self.dimension,
             "metric": self.metric,
+            "index_type": self.index_type,
             "documents": [doc.to_dict() for doc in self._documents.values()],
         }
 
@@ -276,8 +369,13 @@ class Collection:
             dimension=data["dimension"],
             metric=data.get("metric", "cosine"),
             embedder=embedder,
+            index_type=data.get("index_type", "flat"),
         )
         for doc_data in data.get("documents", []):
             doc = Document.from_dict(doc_data)
             col._documents[doc.id] = doc
+            if doc.text:
+                col.bm25.index_document(doc.id, doc.text)
+            if col.hnsw is not None:
+                col.hnsw.insert(doc.id, doc.vector)
         return col
