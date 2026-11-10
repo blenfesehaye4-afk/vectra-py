@@ -5,44 +5,40 @@ from typing import List, Sequence, Tuple
 
 
 class ScalarQuantizer:
-    """Scalar Quantizer mapping continuous floats to 8-bit signed integers [-128, 127]."""
+    """Symmetric 8-bit Scalar Quantizer [-127, 127] preserving angular geometric properties."""
 
     def __init__(self, dimension: int):
         self.dimension = dimension
-        self.min_vals: List[float] = []
-        self.max_vals: List[float] = []
+        self.scales: List[float] = []
         self.is_fitted = False
 
     def fit(self, vectors: Sequence[Sequence[float]]) -> None:
-        """Derive per-dimension dynamic range [min, max] from sample vectors."""
+        """Derive per-dimension absolute maximum scales from sample vectors."""
         if not vectors:
             raise ValueError("Cannot fit ScalarQuantizer with empty dataset")
 
-        self.min_vals = [min(v[d] for v in vectors) for d in range(self.dimension)]
-        self.max_vals = [max(v[d] for v in vectors) for d in range(self.dimension)]
-
-        # Prevent zero division if constant column
+        self.scales = []
         for d in range(self.dimension):
-            if math.isclose(self.min_vals[d], self.max_vals[d], abs_tol=1e-7):
-                self.max_vals[d] = self.min_vals[d] + 1e-4
+            max_abs = max(abs(v[d]) for v in vectors)
+            if max_abs <= 1e-9:
+                self.scales.append(1.0)
+            else:
+                self.scales.append(max_abs)
 
         self.is_fitted = True
 
     def quantize(self, vector: Sequence[float]) -> List[int]:
-        """Quantize float vector into int8 elements [-128, 127]."""
+        """Quantize float vector into int8 elements [-127, 127]."""
         if not self.is_fitted:
             raise RuntimeError("ScalarQuantizer must be fitted before quantizing")
 
         int8_vec: List[int] = []
         for d in range(self.dimension):
             val = vector[d]
-            min_v = self.min_vals[d]
-            max_v = self.max_vals[d]
-
-            # Scale to [0, 255], shift to [-128, 127]
-            normed = (val - min_v) / (max_v - min_v)
-            clamped = max(0.0, min(1.0, normed))
-            q = int(round(clamped * 255.0)) - 128
+            scale = self.scales[d]
+            normalized = val / scale
+            clamped = max(-1.0, min(1.0, normalized))
+            q = int(round(clamped * 127.0))
             int8_vec.append(q)
 
         return int8_vec
@@ -55,11 +51,8 @@ class ScalarQuantizer:
         recon: List[float] = []
         for d in range(self.dimension):
             q = quantized_vector[d]
-            min_v = self.min_vals[d]
-            max_v = self.max_vals[d]
-
-            normed = (q + 128) / 255.0
-            recon.append(min_v + normed * (max_v - min_v))
+            scale = self.scales[d]
+            recon.append((q / 127.0) * scale)
 
         return recon
 
