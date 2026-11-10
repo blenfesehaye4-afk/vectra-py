@@ -86,9 +86,7 @@ class HNSWIndex:
         Returns list of (distance, node_id) sorted by distance ascending.
         """
         visited: Set[str] = set(enter_points)
-        # candidates: min-heap of (dist, node_id)
         candidates: List[Tuple[float, str]] = []
-        # nearest: max-heap of (-dist, node_id) storing best ef elements
         nearest: List[Tuple[float, str]] = []
 
         for ep in enter_points:
@@ -119,6 +117,90 @@ class HNSWIndex:
         result = [(-neg_d, nid) for neg_d, nid in nearest]
         result.sort(key=lambda x: x[0])
         return result
+
+    def _select_neighbors(
+        self,
+        query: List[float],
+        candidates: List[Tuple[float, str]],
+        m_max: int,
+    ) -> List[str]:
+        """Simple greedy neighbor selection bounded by m_max."""
+        sorted_candidates = sorted(candidates, key=lambda x: x[0])
+        return [nid for _, nid in sorted_candidates[:m_max]]
+
+    def insert(self, node_id: str, vector: List[float]) -> None:
+        """Insert vector into HNSW index."""
+        if len(vector) != self.dimension:
+            raise ValueError(f"Vector dimension {len(vector)} does not match index dimension {self.dimension}")
+
+        if node_id in self.nodes:
+            self.delete(node_id)
+
+        node_level = self._random_level()
+        new_node = HNSWNode(node_id, vector, node_level)
+        self.nodes[node_id] = new_node
+
+        if self.enter_point is None:
+            self.enter_point = node_id
+            self.max_level = node_level
+            return
+
+        curr_ep = [self.enter_point]
+
+        # Top-down zoom to node_level + 1
+        for layer in range(self.max_level, node_level, -1):
+            candidates = self._search_layer(vector, curr_ep, ef=1, layer=layer)
+            if candidates:
+                curr_ep = [candidates[0][1]]
+
+        # Multi-layer insertion from min(max_level, node_level) down to 0
+        top_insert_layer = min(self.max_level, node_level)
+        for layer in range(top_insert_layer, -1, -1):
+            candidates = self._search_layer(vector, curr_ep, ef=self.ef_construction, layer=layer)
+            m_limit = self.m0 if layer == 0 else self.m
+            neighbors = self._select_neighbors(vector, candidates, m_limit)
+
+            # Link new node to selected neighbors
+            for nb_id in neighbors:
+                new_node.add_neighbor(layer, nb_id)
+                self.nodes[nb_id].add_neighbor(layer, node_id)
+
+                # Prune neighbor connections if exceeding m_limit
+                nb_neighbors = self.nodes[nb_id].get_neighbors(layer)
+                if len(nb_neighbors) > m_limit:
+                    nb_candidates = [(self._dist(self.nodes[nb_id].vector, self.nodes[n].vector), n) for n in nb_neighbors]
+                    pruned = self._select_neighbors(self.nodes[nb_id].vector, nb_candidates, m_limit)
+                    self.nodes[nb_id].set_neighbors(layer, set(pruned))
+
+            curr_ep = [c[1] for c in candidates]
+
+        if node_level > self.max_level:
+            self.max_level = node_level
+            self.enter_point = node_id
+
+    def delete(self, node_id: str) -> bool:
+        """Delete node from HNSW index and re-wire connections."""
+        if node_id not in self.nodes:
+            return False
+
+        node = self.nodes.pop(node_id)
+
+        # Remove reference from all neighbors
+        for layer, neighbors in node.friends.items():
+            for nb_id in neighbors:
+                if nb_id in self.nodes:
+                    self.nodes[nb_id].friends.get(layer, set()).discard(node_id)
+
+        # Reassign enter_point if needed
+        if self.enter_point == node_id:
+            if not self.nodes:
+                self.enter_point = None
+                self.max_level = -1
+            else:
+                self.enter_point = next(iter(self.nodes.keys()))
+                self.max_level = max(n.level for n in self.nodes.values())
+
+        return True
 
     def search_knn(
         self,
