@@ -34,7 +34,6 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
     val = dot_product(a, b) / (norm_a * norm_b)
-    # Clamp due to floating point inaccuracies
     return max(-1.0, min(1.0, val))
 
 
@@ -81,9 +80,28 @@ def compute_distance_and_score(
         return dist, score
     elif metric in ("dot", "dot_product"):
         dp = dot_product(a, b)
-        # Dot product distance is negative dot product; score normalized via sigmoid-like mapping
         dist = -dp
         score = 1.0 / (1.0 + math.exp(-max(-50.0, min(50.0, dp))))
         return dist, score
     else:
         raise ValueError(f"Unsupported metric '{metric}'. Expected 'cosine', 'euclidean', 'manhattan', or 'dot_product'.")
+
+
+def compute_distance(a: Sequence[float], b: Sequence[float], metric: str = "cosine") -> float:
+    """Compute distance between two vectors using the specified metric."""
+    dist, _ = compute_distance_and_score(metric, a, b)
+    return dist
+
+
+def compute_score(dist: float, metric: str = "cosine") -> float:
+    """Derive normalized ranking score from distance."""
+    metric = metric.lower()
+    if metric == "cosine":
+        sim = 1.0 - dist
+        return (sim + 1.0) / 2.0
+    elif metric in ("euclidean", "l2", "manhattan", "l1"):
+        return 1.0 / (1.0 + dist)
+    elif metric in ("dot", "dot_product"):
+        dp = -dist
+        return 1.0 / (1.0 + math.exp(-max(-50.0, min(50.0, dp))))
+    return 1.0 / (1.0 + max(0.0, dist))
