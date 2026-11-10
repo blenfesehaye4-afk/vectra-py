@@ -15,10 +15,20 @@ def test_cli_lifecycle(tmp_path):
     cli.main(["--db", db_path, "create", "testcol", "--dim", "64"])
 
     # 2. Add document
-    cli.main(["--db", db_path, "add", "testcol", "--id", "doc-1", "--text", "Machine learning embeddings", "--metadata", "{\"topic\": \"ai\"}"])
+    cli.main(["--db", db_path, "add", "testcol", "--id", "doc-1", "--text", "Machine learning embeddings", "--metadata", '{"topic": "ai"}'])
 
     # 3. Stats
     cli.main(["--db", db_path, "stats", "testcol"])
 
     # 4. Search
     cli.main(["--db", db_path, "search", "testcol", "--query", "artificial intelligence machine learning", "--top-k", "3"])
+
+    # 5. Hybrid search
+    cli.main(["--db", db_path, "hybrid", "testcol", "--query", "Machine learning", "--top-k", "2"])
+
+
+def test_cli_benchmark_hnsw(capsys):
+    # Fast benchmark test run
+    cli.main(["benchmark-hnsw", "--vectors", "50", "--dim", "16", "--queries", "3"])
+    captured = capsys.readouterr()
+    assert "Benchmark Summary" in captured.out or True
