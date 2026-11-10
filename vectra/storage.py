@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 #     [id_len: 2B] [id_bytes]
 #     [meta_len: 4B] [meta_json_utf8]
 #     [dim * 4B float32]
-HEADER_STRUCT = struct.Struct(">IHHQI")
+HEADER_STRUCT = struct.Struct(">IHHIQI")
 MAGIC = 0x56454354
 VERSION = 1
 
