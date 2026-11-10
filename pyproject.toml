@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vectra-py"
-version = "0.1.0"
-description = "Lightweight, embeddable vector search engine & semantic memory store for Python AI applications"
+version = "0.3.0"
+description = "Lightweight, embeddable vector search engine & hybrid retrieval store for Python AI applications"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -14,6 +14,11 @@ authors = [
 ]
 keywords = [
     "vector-database",
+    "hnsw",
+    "hybrid-search",
+    "bm25",
+    "product-quantization",
+    "scalar-quantization",
     "embeddings",
     "similarity-search",
     "semantic-search",
@@ -38,11 +43,23 @@ classifiers = [
 ]
 dependencies = [
     "rich>=13.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "pydantic>=2.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "httpx>=0.24.0",
+]
+server = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "pydantic>=2.0.0",
+]
+cli = [
+    "rich>=13.0.0",
 ]
 
 [project.scripts]
