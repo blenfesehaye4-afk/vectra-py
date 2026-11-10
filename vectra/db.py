@@ -29,11 +29,12 @@ class VectraDB:
         dimension: int = 128,
         metric: str = "cosine",
         embedder: BaseEmbedder | None = None,
+        index_type: str = "flat",
     ) -> Collection:
         """Create a new collection. Raises ValueError if collection already exists."""
         if name in self._collections:
             raise ValueError(f"Collection '{name}' already exists")
-        col = Collection(name=name, dimension=dimension, metric=metric, embedder=embedder)
+        col = Collection(name=name, dimension=dimension, metric=metric, embedder=embedder, index_type=index_type)
         self._collections[name] = col
         if self.storage_dir:
             self.persist(name)
@@ -51,12 +52,13 @@ class VectraDB:
         dimension: int = 128,
         metric: str = "cosine",
         embedder: BaseEmbedder | None = None,
+        index_type: str = "flat",
     ) -> Collection:
         """Retrieve existing collection or create if missing."""
         if name in self._collections:
             return self._collections[name]
         return self.create_collection(
-            name=name, dimension=dimension, metric=metric, embedder=embedder
+            name=name, dimension=dimension, metric=metric, embedder=embedder, index_type=index_type
         )
 
     def list_collections(self) -> list[str]:

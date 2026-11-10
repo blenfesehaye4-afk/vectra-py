@@ -64,6 +64,13 @@ class HybridQueryRequest(BaseModel):
 # Endpoints
 # -----------------------------------------------------------------------------
 
+def _fetch_collection(name: str):
+    try:
+        return _DB.get_collection(name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+
+
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": "vectra-py", "version": "0.3.0"}
@@ -71,9 +78,10 @@ def health():
 
 @app.get("/v1/metrics")
 def metrics():
-    total_vectors = sum(len(c) for c in _DB.list_collections().values())
+    names = _DB.list_collections()
+    total_vectors = sum(len(_DB.get_collection(n)) for n in names)
     return {
-        "vectra_collections_count": len(_DB.list_collections()),
+        "vectra_collections_count": len(names),
         "vectra_total_vectors": total_vectors,
     }
 
@@ -93,15 +101,13 @@ def create_collection(req: CreateCollectionRequest):
 
 @app.get("/v1/collections")
 def list_collections():
-    cols = _DB.list_collections()
-    return {"collections": [col.stats() for col in cols.values()]}
+    names = _DB.list_collections()
+    return {"collections": [_DB.get_collection(n).stats() for n in names]}
 
 
 @app.get("/v1/collections/{name}")
 def get_collection(name: str):
-    col = _DB.get_collection(name)
-    if not col:
-        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+    col = _fetch_collection(name)
     return col.stats()
 
 
@@ -114,10 +120,7 @@ def delete_collection(name: str):
 
 @app.post("/v1/collections/{name}/upsert")
 def upsert_documents(name: str, req: UpsertRequest):
-    col = _DB.get_collection(name)
-    if not col:
-        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
-
+    col = _fetch_collection(name)
     docs_data = [d.model_dump() for d in req.documents]
     count = col.add_batch(docs_data)
     return {"status": "success", "upserted": count}
@@ -125,10 +128,7 @@ def upsert_documents(name: str, req: UpsertRequest):
 
 @app.post("/v1/collections/{name}/query")
 def query_collection(name: str, req: QueryRequest):
-    col = _DB.get_collection(name)
-    if not col:
-        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
-
+    col = _fetch_collection(name)
     try:
         results = col.query(
             vector=req.vector,
@@ -147,10 +147,7 @@ def query_collection(name: str, req: QueryRequest):
 
 @app.post("/v1/collections/{name}/hybrid")
 def hybrid_query(name: str, req: HybridQueryRequest):
-    col = _DB.get_collection(name)
-    if not col:
-        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
-
+    col = _fetch_collection(name)
     fused = col.hybrid_query(
         text=req.text,
         top_k=req.top_k,
@@ -163,10 +160,7 @@ def hybrid_query(name: str, req: HybridQueryRequest):
 
 @app.post("/v1/collections/{name}/deduplicate")
 def deduplicate_collection(name: str, threshold: float = Query(0.95, ge=0.0, le=1.0)):
-    col = _DB.get_collection(name)
-    if not col:
-        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
-
+    col = _fetch_collection(name)
     pairs = col.deduplicate(threshold=threshold)
     return {
         "duplicates": [
